@@ -2,7 +2,7 @@
 
 import torch
 from transformers import get_linear_schedule_with_warmup
-from transformers import GPT2Config,AdamW
+from transformers import GPT2Config, AdamW
 from transformers import AutoTokenizer, AutoModel
 import pickle5 as pickle
 
@@ -21,7 +21,6 @@ import argparse
 import sys
 import re
 
-
 POST_CNT = 5880
 IN_TOKENS = 768
 device = 'cpu'
@@ -33,6 +32,7 @@ MODEL_FN = 'model.pth'
 
 seps = set('.!?')
 garb = set(' .!?,')
+
 
 def cut(s, num=2):
     if num <= 0:
@@ -100,11 +100,11 @@ def sample_seq(model, context, length, device, top_k, top_p, temperature=TEMP):
             top_k > 0: keep only top k tokens with highest probability (top-k filtering).
             top_p > 0.0: keep the top tokens with cumulative probability >= top_p (nucleus filtering).
     """
-    
+
     context = torch.tensor(context, dtype=torch.long, device=device)
     context = context.unsqueeze(0)
     generated = context
-    with torch.no_grad():  
+    with torch.no_grad():
         for _ in range(length):
             inputs = {'input_ids': generated}
             outputs = model(**inputs)
@@ -115,7 +115,8 @@ def sample_seq(model, context, length, device, top_k, top_p, temperature=TEMP):
     return generated
 
 
-def generate_sample(data, tokenizer, model, length=SEQ_LEN, temperature=TEMP, top_k=TOP_K, top_p=0.5, device=torch.device(device)):
+def generate_sample(data, tokenizer, model, length=SEQ_LEN, temperature=TEMP, top_k=TOP_K, top_p=0.5,
+                    device=torch.device(device)):
     """ Generate summaries for articles.
         Args:
             data = GPT21024Dataset object
@@ -124,27 +125,35 @@ def generate_sample(data, tokenizer, model, length=SEQ_LEN, temperature=TEMP, to
     """
 
     for i in range(len(data)):
-        context = data[i]
+        post_len = data[i][1]
+        context = data[i][0][:post_len]
 
-        generated_text = sample_seq(model, context, length, device, top_k, top_p, temperature,)
+        generated_text = sample_seq(model, context, length, device, top_k, top_p, temperature)
         generated_text = generated_text[0, len(context):]
         text = tokenizer.convert_ids_to_tokens(generated_text, skip_special_tokens=True)
         text = tokenizer.convert_tokens_to_string(text)
         text = cut(re.sub(r'\s+', ' ', text), randint(1, 2))
 
-        print('new_post:')
-        print(f'> {tokenizer.decode(context)}', end='\n\n')
-        print("generated_comment:")
-        print(f'>{text}', end='\n\n')
+        print(f'> P: {tokenizer.decode(context)}')
+        print(f'> C: {text}', end='\n\n\n')
 
 
 def data_preparation(fin, tokenizer):
     test_ready = []
+    # comm = 'раз два три четыре пять.'
     for post in fin:
         post_tok = tokenizer.encode(post)
+        # cmt_tok = tokenizer.encode(comm)
+        # content = post_tok + tokenizer.encode(tokenizer.sep_token) + cmt_tok
+        content = post_tok
+        if len(content) > IN_TOKENS or len(post_tok) == 0:
+            print(f'wrong len: {len(content)}', end='', file=sys.stderr)
+            continue
+
         text = tokenizer.encode(tokenizer.pad_token) * IN_TOKENS
-        text[:len(post_tok)] = post_tok
-        test_ready.append(text)
+        text[:len(content)] = content
+        test_ready.append((text, len(post_tok)))
+
     return test_ready
 
 
@@ -156,6 +165,7 @@ if __name__ == '__main__':
     parser.add_argument("--temp", default=1.5, type=float)
     parser.add_argument("--topk", default=10, type=int)
     parser.add_argument("--device", default='cpu')
+    parser.add_argument("--cppath", default='state_dict.pt')
 
     args = parser.parse_args()
 
@@ -163,10 +173,12 @@ if __name__ == '__main__':
     SEQ_LEN = args.seq
     TEMP = args.temp
     TOP_K = args.topk
+    device = args.device
+    CP_PATH = args.cppath
 
     print('loading tokenizer...', file=sys.stderr)
     try:
-        tokenizer = torch.load('tokenizer', map_location=torch.device('cpu'))
+        tokenizer = torch.load('tokenizer', map_location=torch.device(device))
     except:
         tokenizer = AutoTokenizer.from_pretrained("sberbank-ai/rugpt3small_based_on_gpt2")
 
@@ -179,7 +191,7 @@ if __name__ == '__main__':
     # if MODEL_FN not in os.listdir():
     #     print('Model not found. Use actual repo state.', file=sys.stderr)
     try:
-        model = model.load(MODEL_FN)
+        model = torch.load(MODEL_FN, map_location=torch.device(device))
         model.to(torch.device(device))
     except:
         model = AutoModelForCausalLM.from_pretrained("sberbank-ai/rugpt3small_based_on_gpt2")
@@ -190,8 +202,9 @@ if __name__ == '__main__':
         model.to(torch.device(device))
         torch.save(model, MODEL_FN)
 
-
-    print('Prediction:', file=sys.stderr)
-    with open(samples_file, 'r') as fin:
-        test_ready = data_preparation(fin, tokenizer)
-        generate_sample(test_ready, tokenizer, model, device=torch.device(device))
+    model.eval()
+    with torch.no_grad():
+        print('Prediction:', file=sys.stderr)
+        with open(samples_file, 'r') as fin:
+            test_ready = data_preparation(fin, tokenizer)
+            generate_sample(test_ready, tokenizer, model, device=torch.device(device))
